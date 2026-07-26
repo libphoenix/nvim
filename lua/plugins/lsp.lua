@@ -180,6 +180,7 @@ return {
             },
           },
           harper_ls = {
+            filetypes = { "markdown" },
             settings = {
               ["harper-ls"] = {
                 userDictPath = "",
