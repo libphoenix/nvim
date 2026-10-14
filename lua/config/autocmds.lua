@@ -125,6 +125,92 @@ vim.api.nvim_create_autocmd({ "FileType" }, {
   end,
 })
 
+local c_syntax_namespace = vim.api.nvim_create_namespace("c_family_syntax")
+
+local function update_c_syntax_diagnostics(bufnr)
+  local ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+  if not ok then
+    vim.diagnostic.reset(c_syntax_namespace, bufnr)
+    return
+  end
+
+  local trees = parser:parse()
+  local tree = trees and trees[1]
+  if not tree then
+    return
+  end
+
+  local diagnostics = {}
+  local function collect(node)
+    local is_missing = node:missing()
+    if is_missing or node:type() == "ERROR" then
+      local start_row, start_col, end_row, end_col = node:range()
+      if start_row == end_row and start_col == end_col then
+        end_col = start_col + 1
+      end
+      diagnostics[#diagnostics + 1] = {
+        lnum = start_row,
+        col = start_col,
+        end_lnum = end_row,
+        end_col = end_col,
+        severity = vim.diagnostic.severity.ERROR,
+        message = is_missing and ("Missing " .. node:type()) or "Syntax error",
+        source = "treesitter",
+      }
+      return
+    end
+
+    if node:has_error() then
+      for child in node:iter_children() do
+        collect(child)
+      end
+    end
+  end
+
+  collect(tree:root())
+  vim.diagnostic.set(c_syntax_namespace, bufnr, diagnostics)
+end
+
+-- Report parser errors only. Clangd still provides completion and navigation.
+vim.api.nvim_create_autocmd({ "BufEnter", "TextChanged", "InsertLeave" }, {
+  group = augroup("c_family_syntax_diagnostics"),
+  pattern = { "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp", "*.hxx", "*.m", "*.mm", "*.cu" },
+  callback = function(event)
+    vim.schedule(function()
+      if vim.api.nvim_buf_is_valid(event.buf) then
+        update_c_syntax_diagnostics(event.buf)
+      end
+    end)
+  end,
+})
+
+-- A C/C++ buffer only needs one clangd client. If another one attaches,
+-- detach it before it can duplicate definitions, completions, and inlay hints.
+vim.api.nvim_create_autocmd("LspAttach", {
+  group = augroup("single_clangd_client"),
+  callback = function(event)
+    local client = vim.lsp.get_client_by_id(event.data.client_id)
+    if not client or client.name ~= "clangd" then
+      return
+    end
+
+    -- Hide clangd's compiler and semantic diagnostics for this buffer.
+    for _, is_pull in ipairs({ false, true }) do
+      local namespace = vim.lsp.diagnostic.get_namespace(client.id, is_pull)
+      vim.diagnostic.enable(false, { bufnr = event.buf, ns_id = namespace })
+    end
+
+    for _, other in ipairs(vim.lsp.get_clients({ bufnr = event.buf, name = "clangd" })) do
+      if other.id ~= client.id then
+        vim.schedule(function()
+          vim.lsp.buf_detach_client(event.buf, client.id)
+        end)
+        return
+      end
+    end
+  end,
+})
+
 -- Auto create dir when saving a file, in case some intermediate directory does not exist
 vim.api.nvim_create_autocmd({ "BufWritePre" }, {
   group = augroup("auto_create_dir"),
